@@ -1,86 +1,74 @@
-# Apple Sign Desktop — encrypted source + multi-platform CI
+# 苹果签（Apple Sign）
 
-本仓库存放 **GPG AES256 加密后的 desktop 构建源码**（`source.zip.gpg`），以及解密后多平台打包的 GitHub Actions。
+面向 iOS 开发者的桌面端 **IPA 重签与证书管理工具**。跨平台支持 macOS、Windows、Linux。
 
-源码本身不落明文；解密口令通过 GitHub Actions Secret 注入。
+完成在本地完成 IPA 解析、动态库注入、Mach-O 检视与修改、P12 证书管理，一键重签并导出或 OTA 安装到设备。
 
-## Secrets
+---
 
-| Name | 说明 |
+## 核心功能
+
+### IPA 签名
+
+- 导入本地 `.ipa`，预览应用名、Bundle ID、版本、图标与依赖库树
+- 应用库管理：搜索、排序、编辑元数据（名称 / Bundle ID / 版本 / 图标）
+- 选择 P12 证书执行重签，分阶段展示解析、注入、签名、打包进度
+- 高级签名选项：移除最低系统版本、设备限制、PlugIns、Watch App、URL Schemes；开启文件共享；移除 embedded.mobileprovision；修复 CydiaSubstrate 越狱依赖路径
+- 签名性能选项：CRC32 校验、Hash 缓存加速、ZIP 压缩级别（无 / 快 / 中 / 慢）
+- 已签名应用管理：记录签名时间与所用证书，支持导出、OTA 安装、详情查看
+
+### 证书管理
+
+- 导入 P12 + 描述文件 + 密码，或三合一 ZIP（`cert.p12` + `profile.mobileprovision` + `password.txt`）
+- 证书列表：全部 / 有效 / 已过期筛选，支持搜索与排序
+- 展示 Team ID、Bundle ID、序列号、创建与过期时间、描述文件匹配状态、吊销状态
+- 解析并展示 mobileprovision 权限（Entitlements）列表
+- 修改密码、重新检测、导出 ZIP / 文件夹、在 Finder 中打开、删除
+
+### 证书过期与状态检测
+
+- 导入时解析过期时间与描述文件匹配情况
+- 自动判定：未过期、未吊销、描述文件匹配 → 有效
+- 过期证书高亮显示；支持手动「重新检测」刷新状态
+- 签名记录关联证书过期日，便于追溯
+
+### 动态库管理
+
+- 独立插件库：管理 Dylib 与 Framework，支持全部 / Framework / Dylib 筛选
+- 导入本地 `.dylib`、`.framework` 或 zip，自动解析依赖树
+- 重命名、编辑嵌套依赖、导出（可选连同子依赖）、删除
+- 从插件库批量注入到 IPA，按依赖树逐级挂载，不拍平到 App 根目录
+
+### 三种注入方式
+
+| 方式 | 说明 |
 |------|------|
-| `SOURCE_GPG_PASSPHRASE` | 与打包脚本加密时相同的 GPG 对称口令 |
-| `TAURI_SIGNING_PRIVATE_KEY` | Tauri updater 私钥内容（或 base64）；无则跳过 updater 签名产物 |
-| `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | 私钥密码（可选） |
+| **加载动态库** | 向宿主 Mach-O 写入 `LC_LOAD_DYLIB` 或 `LC_LOAD_WEAK_DYLIB`，库文件落盘到 bundle；可选弱引用 |
+| **入口动态加载** | 修改入口为 stub + `dlopen` 加载 hook 库，hook 不出现在 Load Commands；可选懒加载（RTLD_LAZY） |
+| **内存嵌入** | 签名阶段将 hook 嵌入主程序 Mach-O，不落盘、不写 Load Command；可选要求全部架构匹配 |
 
-## 更新加密源码
+注入来源：本地文件（`.dylib` / `.framework`）或插件库多选。
 
-在 `fast-sign` 仓库执行：
+### Mach-O 分析
 
-```bash
-export SOURCE_GPG_PASSPHRASE='your-passphrase'
-./desktop/scripts/pack_encrypted_source.sh
-# 默认写出到 ../apple-sign-desktop-action/source.zip.gpg
-```
+- 独立 Mach-O 检视器：树形浏览 Fat Header → 架构 → Mach Header → Load Commands → Segments → Sections
+- 展示偏移、字段类型、解码值与原始十六进制
+- 可编辑模式：内联 patch、新增 / 删除 Load Command（`LC_LOAD_DYLIB`、`LC_LOAD_WEAK_DYLIB`、`LC_RPATH`）、拖拽调整 LC 顺序
+- 修改后自动标记变更，并提示关闭签名 Hash 缓存
 
-然后在本仓库提交并 push `source.zip.gpg`。
+### 其他能力
 
-## 触发构建
+- **OTA 无线安装**：内置 HTTP 服务，同 Wi-Fi 下 iPhone 扫码或打开链接安装
+- **应用更新**：内置 Tauri Updater，支持在线更新
+- **存储管理**：查看应用库、下载、已签名、缓存占用，一键清理临时缓存
+- **多平台**：macOS（Apple Silicon / Intel）、Windows、Linux
 
-### 手动触发
+---
 
-Actions → **Build Desktop** → Run workflow。
+## 关于本仓库
 
-- 填写 **Release tag**（如 `v1.0.0`）：构建完成后自动创建 GitHub Release 并上传各平台安装包。
-- 留空：仅上传 workflow artifacts，不创建 Release。
+本仓库用于 **加密源码托管** 与 **GitHub Actions 多平台自动构建**，不包含明文源码。
 
-### 推送 tag 自动发布
-
-推送符合 `v*` 的 tag（如 `v1.0.0`）也会触发构建，并在成功后发布到 GitHub Release。
-
-### 推送加密源码
-
-提交并 push `source.zip.gpg` 会触发构建；未带 Release tag 时只保留 workflow artifacts（14 天）。
-
-矩阵：
-
-- `macos-latest`（Apple Silicon）
-- `macos-13`（Intel x86_64，若 runner 可用）
-- `ubuntu-22.04`
-- `windows-latest`
-
-产物同时上传为 workflow artifacts；若指定了 Release tag，还会出现在仓库的 **Releases** 页面。
-
-## Author / 元数据
-
-桌面应用 Author 在加密源码中配置（`desktop/src-tauri/Cargo.toml`、`tauri.conf.json`），不含个人邮箱。设置页展示为「猪猪」。
-
-Release 说明使用固定文案，不会从 commit 自动生成（避免暴露 git 作者邮箱）。若希望 git 历史也不带个人邮箱，可配置 GitHub 提供的 `noreply` 地址：
-
-```bash
-git config user.email "ID+username@users.noreply.github.com"
-```
-
-（`ID` 与 `username` 见 GitHub → Settings → Emails）
-
-## Workflow 权限
-
-工作流使用默认 `GITHUB_TOKEN`，无需额外 Secret。权限在 workflow 中显式声明：
-
-| 范围 | 用途 |
+| 文档 | 说明 |
 |------|------|
-| `contents: read` | 检出代码（build job） |
-| `actions: write` | 上传构建产物 artifact |
-| `contents: write` | 创建 Release、上传安装包（release job） |
-| `actions: read` | 下载各平台 artifact（release job） |
-
-若仓库 **Settings → Actions → General → Workflow permissions** 设为「Read repository contents and packages permissions only」，以上 job 级权限声明仍会生效；无需改为全局 Read and write。
-
-## 本地解密试跑
-
-```bash
-gpg --batch --yes --pinentry-mode loopback \
-  --passphrase "$SOURCE_GPG_PASSPHRASE" \
-  --decrypt -o source.zip source.zip.gpg
-unzip -q source.zip -d src
-cd src/desktop && npm ci && npm run tauri build
-```
+| Releases | 各平台安装包（仓库 Releases 页面下载） |
