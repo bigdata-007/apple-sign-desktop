@@ -82,6 +82,19 @@ jobs:
             patchelf \
             libssl-dev
 
+      # openssl-sys vendored 在 Windows 要用完整 Perl；Git Bash 的 MSYS perl 缺 Locale::Maketext::Simple。
+      - name: Install Strawberry Perl (Windows OpenSSL)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          choco install strawberryperl -y --no-progress
+          echo "C:/Strawberry/perl/bin" >> "$GITHUB_PATH"
+          echo "C:/Strawberry/c/bin" >> "$GITHUB_PATH"
+          export PATH="/c/Strawberry/perl/bin:/c/Strawberry/c/bin:$PATH"
+          perl -v | head -3
+          perl -MLocale::Maketext::Simple -e "print qq(Locale::Maketext::Simple OK\n)"
+
       - name: Setup Node
         uses: actions/setup-node@v5
         with:
@@ -112,6 +125,13 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
           set -euo pipefail
+          # 确保 OpenSSL 配置走 Strawberry Perl，而不是 Git Bash 的 /usr/bin/perl
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            export PATH="/c/Strawberry/perl/bin:/c/Strawberry/c/bin:$PATH"
+            hash -r
+            which perl
+            perl -v | head -2
+          fi
           EXTRA="${{ matrix.tauri_args }}"
           if [ -n "${TAURI_SIGNING_PRIVATE_KEY:-}" ]; then
             echo "updater signing key present"
