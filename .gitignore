@@ -1,0 +1,6 @@
+# Local secrets — never commit
+.secrets/
+*.gpg.bak
+src/
+source.zip
+.DS_Store

@@ -1,0 +1,38 @@
+name: Decrypt encrypted desktop source
+description: Decrypt source.zip.gpg with AES256 passphrase and unzip into workspace/
+inputs:
+  passphrase:
+    description: GPG symmetric passphrase (SOURCE_GPG_PASSPHRASE)
+    required: true
+  gpg_file:
+    description: Path to encrypted zip
+    required: false
+    default: source.zip.gpg
+  out_dir:
+    description: Extract directory
+    required: false
+    default: workspace
+runs:
+  using: composite
+  steps:
+    - name: Decrypt and unzip
+      shell: bash
+      env:
+        SOURCE_GPG_PASSPHRASE: ${{ inputs.passphrase }}
+        GPG_FILE: ${{ inputs.gpg_file }}
+        OUT_DIR: ${{ inputs.out_dir }}
+      run: |
+        set -euo pipefail
+        if [ ! -f "$GPG_FILE" ]; then
+          echo "missing $GPG_FILE" >&2
+          exit 1
+        fi
+        gpg --batch --yes --pinentry-mode loopback \
+          --passphrase "$SOURCE_GPG_PASSPHRASE" \
+          --decrypt -o source.zip "$GPG_FILE"
+        rm -rf "$OUT_DIR"
+        mkdir -p "$OUT_DIR"
+        unzip -q source.zip -d "$OUT_DIR"
+        rm -f source.zip
+        echo "extracted to $OUT_DIR"
+        ls "$OUT_DIR"

@@ -1,0 +1,193 @@
+name: Build Desktop
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Release tag (e.g. v1.0.0); omit to skip GitHub Release
+        required: false
+        default: ""
+  push:
+    tags:
+      - "v*"
+    paths:
+      - "source.zip.gpg"
+      - ".github/workflows/build-desktop.yml"
+
+permissions:
+  contents: read
+  actions: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macos-aarch64
+            os: macos-latest
+            tauri_args: ""
+          - name: macos-x86_64
+            os: macos-13
+            tauri_args: "--target x86_64-apple-darwin"
+          - name: linux-x86_64
+            os: ubuntu-22.04
+            tauri_args: ""
+          - name: windows-x86_64
+            os: windows-latest
+            tauri_args: ""
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Require decrypt secret
+        shell: bash
+        run: |
+          if [ -z "${{ secrets.SOURCE_GPG_PASSPHRASE }}" ]; then
+            echo "Missing secret SOURCE_GPG_PASSPHRASE" >&2
+            exit 1
+          fi
+
+      - name: Install gpg (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          if ! command -v gpg >/dev/null 2>&1; then
+            choco install gnupg -y
+            echo "C:/Program Files (x86)/GnuPG/bin" >> "$GITHUB_PATH"
+            echo "C:/Program Files/GnuPG/bin" >> "$GITHUB_PATH"
+          fi
+          gpg --version | head -1
+
+      - name: Decrypt and extract source
+        uses: ./.github/actions/decrypt-source
+        with:
+          passphrase: ${{ secrets.SOURCE_GPG_PASSPHRASE }}
+
+      - name: Install Linux WebKit / GTK deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            libssl-dev
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: workspace/desktop/package-lock.json
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.name == 'macos-x86_64' && 'x86_64-apple-darwin' || '' }}
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: workspace
+          shared-key: desktop-${{ matrix.name }}
+
+      - name: npm ci
+        working-directory: workspace/desktop
+        run: npm ci
+
+      - name: Build (Tauri)
+        working-directory: workspace/desktop
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          EXTRA="${{ matrix.tauri_args }}"
+          if [ -n "${TAURI_SIGNING_PRIVATE_KEY:-}" ]; then
+            echo "updater signing key present"
+          else
+            echo "WARN: TAURI_SIGNING_PRIVATE_KEY unset — build may still produce installers"
+          fi
+          npx tauri build $EXTRA
+
+      - name: Collect artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT="artifacts/${{ matrix.name }}"
+          mkdir -p "$OUT"
+          # Tauri 2 bundle locations
+          shopt -s nullglob
+          BUNDLE="workspace/desktop/src-tauri/target"
+          if [ -d "$BUNDLE/release/bundle" ]; then
+            cp -R "$BUNDLE/release/bundle/"* "$OUT/" 2>/dev/null || true
+          fi
+          # cross-target (e.g. x86_64-apple-darwin)
+          for d in "$BUNDLE"/*/release/bundle; do
+            [ -d "$d" ] || continue
+            cp -R "$d/"* "$OUT/" 2>/dev/null || true
+          done
+          # updater sigs next to bundles
+          find "$BUNDLE" -type f \( -name '*.sig' -o -name '*.tar.gz' -o -name '*.dmg' -o -name '*.AppImage' -o -name '*.deb' -o -name '*.msi' -o -name '*.exe' -o -name '*.nsis.zip' \) \
+            -exec cp -n {} "$OUT/" \; 2>/dev/null || true
+          ls -laR "$OUT" | head -80
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: apple-sign-${{ matrix.name }}${{ inputs.release_tag != '' && format('-{0}', inputs.release_tag) || '' }}
+          path: artifacts/${{ matrix.name }}
+          if-no-files-found: warn
+          retention-days: 14
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    if: >
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) ||
+      (github.event_name == 'workflow_dispatch' && inputs.release_tag != '')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - name: Resolve release tag
+        id: tag
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            echo "name=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+          else
+            echo "name=${{ inputs.release_tag }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: apple-sign-*
+          merge-multiple: true
+          path: release-assets
+
+      - name: List release assets
+        run: find release-assets -type f | head -100
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.name }}
+          name: ${{ steps.tag.outputs.name }}
+          files: release-assets/**
+          body: |
+            Apple Sign Desktop ${{ steps.tag.outputs.name }}
+
+            多平台安装包见下方 Assets。
+          fail_on_unmatched_files: true
