@@ -146,28 +146,44 @@ jobs:
           set -euo pipefail
           OUT="artifacts/${{ matrix.name }}"
           mkdir -p "$OUT"
-          # Tauri 2 bundle locations
           shopt -s nullglob
-          BUNDLE="workspace/desktop/src-tauri/target"
-          if [ -d "$BUNDLE/release/bundle" ]; then
-            cp -R "$BUNDLE/release/bundle/"* "$OUT/" 2>/dev/null || true
-          fi
-          # cross-target (e.g. x86_64-apple-darwin)
-          for d in "$BUNDLE"/*/release/bundle; do
-            [ -d "$d" ] || continue
-            cp -R "$d/"* "$OUT/" 2>/dev/null || true
+          # Cargo workspace → target 在 workspace/target，不在 src-tauri/target
+          CANDIDATES=(
+            workspace/target
+            workspace/desktop/src-tauri/target
+          )
+          for BUNDLE in "${CANDIDATES[@]}"; do
+            [ -d "$BUNDLE" ] || continue
+            echo "scanning $BUNDLE"
+            if [ -d "$BUNDLE/release/bundle" ]; then
+              cp -R "$BUNDLE/release/bundle/"* "$OUT/" 2>/dev/null || true
+            fi
+            # cross-target (e.g. x86_64-apple-darwin)
+            for d in "$BUNDLE"/*/release/bundle; do
+              [ -d "$d" ] || continue
+              cp -R "$d/"* "$OUT/" 2>/dev/null || true
+            done
+            find "$BUNDLE" -type f \( \
+              -name '*.sig' -o -name '*.tar.gz' -o -name '*.dmg' \
+              -o -name '*.AppImage' -o -name '*.deb' -o -name '*.rpm' \
+              -o -name '*.msi' -o -name '*.exe' -o -name '*.nsis.zip' \
+            \) -exec cp -n {} "$OUT/" \; 2>/dev/null || true
           done
-          # updater sigs next to bundles
-          find "$BUNDLE" -type f \( -name '*.sig' -o -name '*.tar.gz' -o -name '*.dmg' -o -name '*.AppImage' -o -name '*.deb' -o -name '*.msi' -o -name '*.exe' -o -name '*.nsis.zip' \) \
-            -exec cp -n {} "$OUT/" \; 2>/dev/null || true
-          ls -laR "$OUT" | head -80
+          ls -laR "$OUT" | head -120
+          # 空目录也算失败，避免 Upload 静默跳过
+          if [ -z "$(find "$OUT" -type f | head -1)" ]; then
+            echo "ERROR: no bundle files collected under $OUT" >&2
+            echo "--- target layout ---" >&2
+            find workspace/target workspace/desktop/src-tauri/target -maxdepth 4 -type d 2>/dev/null | head -80 || true
+            exit 1
+          fi
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v7
         with:
           name: apple-sign-${{ matrix.name }}${{ inputs.release_tag != '' && format('-{0}', inputs.release_tag) || '' }}
           path: artifacts/${{ matrix.name }}
-          if-no-files-found: warn
+          if-no-files-found: error
           retention-days: 14
 
   release:
