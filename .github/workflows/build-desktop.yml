@@ -30,16 +30,16 @@ jobs:
         include:
           - name: macos-aarch64
             os: macos-26
-            tauri_args: ""
+            tauri_args: "--bundles app,dmg"
           - name: macos-x86_64
             os: macos-26-intel
-            tauri_args: "--target x86_64-apple-darwin"
+            tauri_args: "--target x86_64-apple-darwin --bundles app,dmg"
           - name: linux-x86_64
             os: ubuntu-22.04
-            tauri_args: ""
+            tauri_args: "--bundles appimage,deb,rpm"
           - name: windows-x86_64
             os: windows-latest
-            tauri_args: ""
+            tauri_args: "--bundles nsis"
 
     runs-on: ${{ matrix.os }}
 
@@ -181,7 +181,7 @@ jobs:
             [ -d "$ROOT" ] || continue
             case "$UPDATER_KEY" in
               darwin-*)
-                UPDATER="$(find "$ROOT" -type f -path '*/release/bundle/*' -name '*.app.tar.gz' -print -quit || true)"
+                UPDATER="$(find "$ROOT" -type f \( -path '*/bundle/macos/*' -o -path '*/release/bundle/*' \) -name '*.app.tar.gz' -print -quit || true)"
                 ;;
               linux-*)
                 UPDATER="$(find "$ROOT" -type f -path '*/release/bundle/*' -name '*.AppImage' -print -quit || true)"
@@ -198,13 +198,22 @@ jobs:
 
           if [ -z "$UPDATER" ] || [ ! -f "$UPDATER" ]; then
             echo "ERROR: updater package not found for $UPDATER_KEY" >&2
-            find workspace/target -type f -path '*/release/bundle/*' 2>/dev/null | head -80 || true
+            echo "--- bundle files ---" >&2
+            find workspace/target workspace/desktop/src-tauri/target -type f -path '*/bundle/*' 2>/dev/null | head -120 || true
             exit 1
           fi
           SIG="${UPDATER}.sig"
           if [ ! -f "$SIG" ]; then
-            echo "ERROR: missing signature $SIG (need TAURI_SIGNING_PRIVATE_KEY)" >&2
-            exit 1
+            # 交叉编译时偶发：AppleSign-x86_64.app.tar.gz + AppleSign.app.tar.gz.sig
+            base_no_arch="$(basename "$UPDATER" | sed -E 's/-x86_64|-aarch64|_x86_64|_aarch64//')"
+            alt="$(dirname "$UPDATER")/${base_no_arch}.sig"
+            if [ -f "$alt" ]; then
+              SIG="$alt"
+            else
+              echo "ERROR: missing signature for $UPDATER (need TAURI_SIGNING_PRIVATE_KEY)" >&2
+              ls -la "$(dirname "$UPDATER")" >&2 || true
+              exit 1
+            fi
           fi
 
           # 统一文件名，避免双 mac 架构都叫 AppleSign.app.tar.gz
