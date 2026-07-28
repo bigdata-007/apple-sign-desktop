@@ -146,36 +146,85 @@ jobs:
           set -euo pipefail
           OUT="artifacts/${{ matrix.name }}"
           mkdir -p "$OUT"
-          # 安装包：macOS .dmg / Linux .AppImage+.deb+.rpm / Windows *-setup.exe
+          PLATFORM="${{ matrix.name }}"
+          case "$PLATFORM" in
+            macos-aarch64) UPDATER_KEY="darwin-aarch64" ;;
+            macos-x86_64)  UPDATER_KEY="darwin-x86_64" ;;
+            linux-x86_64)  UPDATER_KEY="linux-x86_64" ;;
+            windows-x86_64) UPDATER_KEY="windows-x86_64" ;;
+            *) echo "unknown matrix $PLATFORM" >&2; exit 1 ;;
+          esac
+
           CANDIDATES=(
             workspace/target
             workspace/desktop/src-tauri/target
           )
+
+          # 安装包
           for ROOT in "${CANDIDATES[@]}"; do
             [ -d "$ROOT" ] || continue
-            echo "scanning $ROOT/**/release/bundle"
             while IFS= read -r -d '' f; do
               base="$(basename "$f")"
               dest="$OUT/$base"
-              if [ -e "$dest" ]; then
-                dest="$OUT/${{ matrix.name }}-$base"
-              fi
+              [ -e "$dest" ] && dest="$OUT/${PLATFORM}-$base"
               cp "$f" "$dest"
-              echo "  + $dest"
+              echo "installer + $dest"
             done < <(find "$ROOT" -type f -path '*/release/bundle/*' \( \
               -name '*.dmg' -o -name '*.AppImage' -o -name '*.deb' -o -name '*.rpm' \
               -o -name '*-setup.exe' \
             \) -print0 2>/dev/null || true)
           done
-          ls -la "$OUT" || true
-          first="$(find "$OUT" -type f -print -quit 2>/dev/null || true)"
-          if [ -z "$first" ]; then
-            echo "ERROR: no installer artifacts under $OUT" >&2
-            find workspace/target workspace/desktop/src-tauri/target -type d -path '*/release/bundle' 2>/dev/null \
-              | while read -r d; do echo "== $d"; ls -laR "$d" || true; done | head -80 || true
+
+          # 更新包（Tauri createUpdaterArtifacts）+ 同名 .sig
+          UPDATER=""
+          for ROOT in "${CANDIDATES[@]}"; do
+            [ -d "$ROOT" ] || continue
+            case "$UPDATER_KEY" in
+              darwin-*)
+                UPDATER="$(find "$ROOT" -type f -path '*/release/bundle/*' -name '*.app.tar.gz' -print -quit || true)"
+                ;;
+              linux-*)
+                UPDATER="$(find "$ROOT" -type f -path '*/release/bundle/*' -name '*.AppImage' -print -quit || true)"
+                ;;
+              windows-*)
+                UPDATER="$(find "$ROOT" -type f -path '*/release/bundle/*' -name '*.nsis.zip' -print -quit || true)"
+                if [ -z "$UPDATER" ]; then
+                  UPDATER="$(find "$ROOT" -type f -path '*/release/bundle/*' -name '*-setup.exe' -print -quit || true)"
+                fi
+                ;;
+            esac
+            [ -n "$UPDATER" ] && break
+          done
+
+          if [ -z "$UPDATER" ] || [ ! -f "$UPDATER" ]; then
+            echo "ERROR: updater package not found for $UPDATER_KEY" >&2
+            find workspace/target -type f -path '*/release/bundle/*' 2>/dev/null | head -80 || true
             exit 1
           fi
-          echo "collected example: $first"
+          SIG="${UPDATER}.sig"
+          if [ ! -f "$SIG" ]; then
+            echo "ERROR: missing signature $SIG (need TAURI_SIGNING_PRIVATE_KEY)" >&2
+            exit 1
+          fi
+
+          # 统一文件名，避免双 mac 架构都叫 AppleSign.app.tar.gz
+          case "$UPDATER_KEY" in
+            darwin-aarch64) UNAME="AppleSign_aarch64.app.tar.gz" ;;
+            darwin-x86_64)  UNAME="AppleSign_x86_64.app.tar.gz" ;;
+            linux-x86_64)   UNAME="$(basename "$UPDATER")" ;;
+            windows-x86_64) UNAME="$(basename "$UPDATER")" ;;
+          esac
+          cp "$UPDATER" "$OUT/$UNAME"
+          cp "$SIG" "$OUT/${UNAME}.sig"
+
+          python3 -c "import json,pathlib; p=pathlib.Path(r'$OUT'); m={'platform':'$UPDATER_KEY','updater_file':'$UNAME','signature_file':'${UNAME}.sig'}; p.joinpath('updater-manifest.json').write_text(json.dumps(m,indent=2)+'\n'); print(m)"
+
+          ls -la "$OUT"
+          first="$(find "$OUT" -type f ! -name 'updater-manifest.json' -print -quit || true)"
+          if [ -z "$first" ]; then
+            echo "ERROR: empty artifacts" >&2
+            exit 1
+          fi
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v7
@@ -196,62 +245,158 @@ jobs:
       contents: write
       actions: read
     steps:
+      - name: Checkout (for git notes)
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
       - name: Resolve release tag
         id: tag
         run: |
           if [ "${{ github.event_name }}" = "push" ]; then
-            echo "name=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+            TAG="${GITHUB_REF#refs/tags/}"
           else
-            echo "name=${{ inputs.release_tag }}" >> "$GITHUB_OUTPUT"
+            TAG="${{ inputs.release_tag }}"
           fi
+          VER="${TAG#v}"
+          echo "name=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
 
       - name: Download build artifacts
         uses: actions/download-artifact@v8
         with:
           pattern: apple-sign-*
-          merge-multiple: true
+          merge-multiple: false
           path: release-assets
 
-      - name: Stage release installers only
+      - name: Stage installers, update pack, latest.json
         shell: bash
+        env:
+          # 可在仓库 Variables 设 UPDATE_URL_PREFIX=https://ipadump.com/apple-sign
+          UPDATE_URL_PREFIX: ${{ vars.UPDATE_URL_PREFIX }}
         run: |
           set -euo pipefail
-          mkdir -p upload
+          TAG="${{ steps.tag.outputs.name }}"
+          VER="${{ steps.tag.outputs.version }}"
+          PREFIX="${UPDATE_URL_PREFIX:-/apple-sign}"
+          PREFIX="${PREFIX%/}"
+          CDN_ROOT="cdn/apple-sign"
+          VER_DIR="$CDN_ROOT/v${VER}"
+          mkdir -p upload/installers "$VER_DIR"
+
           while IFS= read -r -d '' f; do
             base="$(basename "$f")"
-            dest="upload/$base"
-            if [ -e "$dest" ]; then
-              rel="${f#release-assets/}"
-              safe="$(echo "$rel" | tr '/' '-')"
-              dest="upload/$safe"
+            case "$base" in
+              updater-manifest.json) continue ;;
+              *.sig|*.app.tar.gz|*.nsis.zip) continue ;;
+              *.dmg|*.AppImage|*.deb|*.rpm|*-setup.exe)
+                cp "$f" "upload/installers/$base"
+                cp "$f" "$VER_DIR/$base"
+                echo "installer $base"
+                ;;
+            esac
+          done < <(find release-assets -type f -print0)
+
+          while IFS= read -r -d '' mf; do
+            python3 -c "
+          import json, pathlib, shutil
+          mf = pathlib.Path(r'''$mf''')
+          data = json.loads(mf.read_text())
+          ver_dir = pathlib.Path(r'''$VER_DIR''')
+          src_u = mf.parent / data['updater_file']
+          src_s = mf.parent / data['signature_file']
+          if not src_u.is_file() or not src_s.is_file():
+              raise SystemExit(f'missing updater/sig for {data}')
+          shutil.copy2(src_u, ver_dir / data['updater_file'])
+          shutil.copy2(src_s, ver_dir / data['signature_file'])
+          print('updater', data['platform'], data['updater_file'])
+          "
+          done < <(find release-assets -type f -name 'updater-manifest.json' -print0)
+
+          NOTES_FILE="$(mktemp)"
+          {
+            if git describe --tags --abbrev=0 "${TAG}^" >/dev/null 2>&1; then
+              PREV="$(git describe --tags --abbrev=0 "${TAG}^")"
+              git log --pretty=format:'- %s' "${PREV}..${TAG}" 2>/dev/null || true
+            elif git rev-list -n 1 "${TAG}" >/dev/null 2>&1; then
+              git log --pretty=format:'- %s' -15 "${TAG}" 2>/dev/null || true
+            else
+              git log --pretty=format:'- %s' -15 HEAD 2>/dev/null || true
             fi
-            cp "$f" "$dest"
-            echo "staged $dest"
-          done < <(find release-assets -type f \( \
-            -name '*.dmg' -o -name '*.AppImage' -o -name '*.deb' -o -name '*.rpm' \
-            -o -name '*-setup.exe' \
-          \) -print0)
-          echo "---- upload tree ----"
-          ls -la upload
-          count="$(find upload -type f | wc -l | tr -d ' ')"
-          echo "installer count: $count"
-          if [ "$count" = "0" ]; then
-            echo "ERROR: no installer files to publish" >&2
-            find release-assets -type f | head -80 || true
-            exit 1
+            echo
+          } > "$NOTES_FILE"
+          if ! grep -q '[^[:space:]]' "$NOTES_FILE"; then
+            echo "- Release ${TAG}" > "$NOTES_FILE"
           fi
+
+          PUB_DATE="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+          export VER PREFIX VER_DIR CDN_ROOT PUB_DATE NOTES_FILE
+          python3 <<'PY'
+          import json, pathlib, os
+          ver = os.environ["VER"]
+          prefix = os.environ["PREFIX"]
+          ver_dir = pathlib.Path(os.environ["VER_DIR"])
+          notes = pathlib.Path(os.environ["NOTES_FILE"]).read_text().strip()
+          pub_date = os.environ["PUB_DATE"]
+          platforms = {}
+          for mf in pathlib.Path("release-assets").rglob("updater-manifest.json"):
+              data = json.loads(mf.read_text())
+              key = data["platform"]
+              fname = data["updater_file"]
+              sig_path = ver_dir / data["signature_file"]
+              if not (ver_dir / fname).is_file() or not sig_path.is_file():
+                  raise SystemExit(f"cdn missing files for {key}")
+              platforms[key] = {
+                  "url": f"{prefix}/v{ver}/{fname}",
+                  "signature": sig_path.read_text().strip(),
+              }
+          if not platforms:
+              raise SystemExit("no platforms for latest.json")
+          doc = {
+              "version": ver,
+              "notes": notes,
+              "pub_date": pub_date,
+              "platforms": dict(sorted(platforms.items())),
+          }
+          cdn_root = pathlib.Path(os.environ["CDN_ROOT"])
+          out = cdn_root / "latest.json"
+          text = json.dumps(doc, ensure_ascii=False, indent=2) + "\n"
+          out.write_text(text)
+          (ver_dir / "latest.json").write_text(text)
+          print(text)
+          PY
+
+          echo "---- installers ----"
+          ls -la upload/installers
+          echo "---- cdn tree ----"
+          find cdn -type f | sort
+          cp "$CDN_ROOT/latest.json" upload/latest.json
+          (cd cdn && zip -qr "../upload/apple-sign-v${VER}-cdn.zip" apple-sign)
+
+      - name: Upload CDN folder artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: apple-sign-cdn-v${{ steps.tag.outputs.version }}
+          path: cdn/apple-sign
+          if-no-files-found: error
+          retention-days: 30
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v3.0.2
         with:
           tag_name: ${{ steps.tag.outputs.name }}
           name: ${{ steps.tag.outputs.name }}
-          files: upload/*
+          files: |
+            upload/installers/*
+            upload/latest.json
+            upload/apple-sign-v${{ steps.tag.outputs.version }}-cdn.zip
           fail_on_unmatched_files: true
           body: |
             Apple Sign Desktop ${{ steps.tag.outputs.name }}
 
+            安装包见 Assets；CDN 同步目录见 `apple-sign-v${{ steps.tag.outputs.version }}-cdn.zip`（含 `latest.json` 与 `v${{ steps.tag.outputs.version }}/` 更新包）。
+
             安装包：
             - macOS：`.dmg`（arm64 / x64）
-            - Linux：`.AppImage`（通用）、`.deb`（Debian/Ubuntu）、`.rpm`（Fedora/RHEL/CentOS）
+            - Linux：`.AppImage` / `.deb` / `.rpm`
             - Windows：`-setup.exe`
