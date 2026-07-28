@@ -65,9 +65,49 @@
 
 ---
 
+## 功能预览
+
+### 导入 IPA
+
+![导入 IPA](preview/导入.png)
+
+### 应用库
+
+![应用库](preview/应用库.png)
+
+### 证书管理
+
+![证书管理](preview/证书.png)
+
+### 插件库
+
+![插件库](preview/插件库.png)
+
+### 动态库注入
+
+![动态库注入](preview/注入.png)
+
+### Mach-O 分析
+
+![Mach-O 分析](preview/分析.png)
+
+### 签名
+
+![签名](preview/签名.png)
+
+### OTA 安装
+
+![OTA 安装](preview/安装.png)
+
+### 设置
+
+![设置](preview/设置.png)
+
+---
+
 ## 关于本仓库
 
-本仓库基于AI全自动Sola模式完全实现，页面预览可查看preview里面的图片。
+本仓库基于AI全自动Sola模式完全实现。
 
 > 使用本项目或其产物软件，请遵守当地法律法规。
 
