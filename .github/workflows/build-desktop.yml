@@ -146,7 +146,7 @@ jobs:
           set -euo pipefail
           OUT="artifacts/${{ matrix.name }}"
           mkdir -p "$OUT"
-          # 只收 Tauri bundle 安装包 / 更新包（不含 target/release 下的裸二进制）
+          # 每平台只收一种安装包：macOS .dmg / Linux .AppImage / Windows *-setup.exe
           CANDIDATES=(
             workspace/target
             workspace/desktop/src-tauri/target
@@ -163,10 +163,7 @@ jobs:
               cp "$f" "$dest"
               echo "  + $dest"
             done < <(find "$ROOT" -type f -path '*/release/bundle/*' \( \
-              -name '*.dmg' -o -name '*.AppImage' -o -name '*.deb' -o -name '*.rpm' \
-              -o -name '*.msi' -o -name '*-setup.exe' -o -name '*.nsis.zip' \
-              -o -name '*.app.tar.gz' -o -name '*.exe.tar.gz' \
-              -o -name '*.sig' \
+              -name '*.dmg' -o -name '*.AppImage' -o -name '*-setup.exe' \
             \) -print0 2>/dev/null || true)
           done
           ls -la "$OUT" || true
@@ -223,7 +220,6 @@ jobs:
             base="$(basename "$f")"
             dest="upload/$base"
             if [ -e "$dest" ]; then
-              # 极端重名：用相对路径打散
               rel="${f#release-assets/}"
               safe="$(echo "$rel" | tr '/' '-')"
               dest="upload/$safe"
@@ -231,14 +227,13 @@ jobs:
             cp "$f" "$dest"
             echo "staged $dest"
           done < <(find release-assets -type f \( \
-            -name '*.dmg' -o -name '*.AppImage' -o -name '*.deb' -o -name '*.rpm' \
-            -o -name '*.msi' -o -name '*-setup.exe' -o -name '*.nsis.zip' \
-            -o -name '*.app.tar.gz' -o -name '*.exe.tar.gz' \
-            -o -name '*.sig' \
+            -name '*.dmg' -o -name '*.AppImage' -o -name '*-setup.exe' \
           \) -print0)
           echo "---- upload tree ----"
           ls -la upload
-          if [ -z "$(find upload -type f -print -quit)" ]; then
+          count="$(find upload -type f | wc -l | tr -d ' ')"
+          echo "installer count: $count"
+          if [ "$count" = "0" ]; then
             echo "ERROR: no installer files to publish" >&2
             find release-assets -type f | head -80 || true
             exit 1
@@ -254,4 +249,7 @@ jobs:
           body: |
             Apple Sign Desktop ${{ steps.tag.outputs.name }}
 
-            多平台安装包见下方 Assets。
+            安装包：
+            - macOS：`.dmg`（arm64 / x64）
+            - Linux：`.AppImage`
+            - Windows：`-setup.exe`
