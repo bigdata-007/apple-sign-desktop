@@ -146,39 +146,35 @@ jobs:
           set -euo pipefail
           OUT="artifacts/${{ matrix.name }}"
           mkdir -p "$OUT"
-          shopt -s nullglob
-          # Cargo workspace → target 在 workspace/target，不在 src-tauri/target
+          # 只收 Tauri bundle 安装包 / 更新包（不含 target/release 下的裸二进制）
           CANDIDATES=(
             workspace/target
             workspace/desktop/src-tauri/target
           )
-          for BUNDLE in "${CANDIDATES[@]}"; do
-            [ -d "$BUNDLE" ] || continue
-            echo "scanning $BUNDLE"
-            if [ -d "$BUNDLE/release/bundle" ]; then
-              cp -R "$BUNDLE/release/bundle/"* "$OUT/" 2>/dev/null || true
-            fi
-            # cross-target (e.g. x86_64-apple-darwin)
-            for d in "$BUNDLE"/*/release/bundle; do
-              [ -d "$d" ] || continue
-              cp -R "$d/"* "$OUT/" 2>/dev/null || true
-            done
+          for ROOT in "${CANDIDATES[@]}"; do
+            [ -d "$ROOT" ] || continue
+            echo "scanning $ROOT/**/release/bundle"
             while IFS= read -r -d '' f; do
-              cp -n "$f" "$OUT/" 2>/dev/null || true
-            done < <(find "$BUNDLE" -type f \( \
-              -name '*.sig' -o -name '*.tar.gz' -o -name '*.dmg' \
-              -o -name '*.AppImage' -o -name '*.deb' -o -name '*.rpm' \
-              -o -name '*.msi' -o -name '*.exe' -o -name '*.nsis.zip' \
+              base="$(basename "$f")"
+              dest="$OUT/$base"
+              if [ -e "$dest" ]; then
+                dest="$OUT/${{ matrix.name }}-$base"
+              fi
+              cp "$f" "$dest"
+              echo "  + $dest"
+            done < <(find "$ROOT" -type f -path '*/release/bundle/*' \( \
+              -name '*.dmg' -o -name '*.AppImage' -o -name '*.deb' -o -name '*.rpm' \
+              -o -name '*.msi' -o -name '*-setup.exe' -o -name '*.nsis.zip' \
+              -o -name '*.app.tar.gz' -o -name '*.exe.tar.gz' \
+              -o -name '*.sig' \
             \) -print0 2>/dev/null || true)
           done
-          # GNU ls 在 pipe 被 head 关闭时会 exit 2；不要让 pipefail 误杀
-          ls -laR "$OUT" | head -120 || true
-          # 空目录也算失败，避免 Upload 静默跳过（用 -quit，避免 find|head + pipefail）
+          ls -la "$OUT" || true
           first="$(find "$OUT" -type f -print -quit 2>/dev/null || true)"
           if [ -z "$first" ]; then
-            echo "ERROR: no bundle files collected under $OUT" >&2
-            echo "--- target layout ---" >&2
-            find workspace/target workspace/desktop/src-tauri/target -maxdepth 4 -type d 2>/dev/null | head -80 || true
+            echo "ERROR: no installer artifacts under $OUT" >&2
+            find workspace/target workspace/desktop/src-tauri/target -type d -path '*/release/bundle' 2>/dev/null \
+              | while read -r d; do echo "== $d"; ls -laR "$d" || true; done | head -80 || true
             exit 1
           fi
           echo "collected example: $first"
@@ -218,17 +214,44 @@ jobs:
           merge-multiple: true
           path: release-assets
 
-      - name: List release assets
-        run: find release-assets -type f | head -100
+      - name: Stage release installers only
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p upload
+          while IFS= read -r -d '' f; do
+            base="$(basename "$f")"
+            dest="upload/$base"
+            if [ -e "$dest" ]; then
+              # 极端重名：用相对路径打散
+              rel="${f#release-assets/}"
+              safe="$(echo "$rel" | tr '/' '-')"
+              dest="upload/$safe"
+            fi
+            cp "$f" "$dest"
+            echo "staged $dest"
+          done < <(find release-assets -type f \( \
+            -name '*.dmg' -o -name '*.AppImage' -o -name '*.deb' -o -name '*.rpm' \
+            -o -name '*.msi' -o -name '*-setup.exe' -o -name '*.nsis.zip' \
+            -o -name '*.app.tar.gz' -o -name '*.exe.tar.gz' \
+            -o -name '*.sig' \
+          \) -print0)
+          echo "---- upload tree ----"
+          ls -la upload
+          if [ -z "$(find upload -type f -print -quit)" ]; then
+            echo "ERROR: no installer files to publish" >&2
+            find release-assets -type f | head -80 || true
+            exit 1
+          fi
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3.0.2
         with:
           tag_name: ${{ steps.tag.outputs.name }}
           name: ${{ steps.tag.outputs.name }}
-          files: release-assets/**
+          files: upload/*
+          fail_on_unmatched_files: true
           body: |
             Apple Sign Desktop ${{ steps.tag.outputs.name }}
 
             多平台安装包见下方 Assets。
-          fail_on_unmatched_files: true
