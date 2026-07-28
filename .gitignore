@@ -1,6 +1,8 @@
 # Local secrets — never commit
 .secrets/
 *.gpg.bak
-src/
+# 勿写无锚点的 `src/`：会匹配 workspace/desktop/src，Tailwind v4 自动扫描会丢样式
+/src/
 source.zip
+workspace/
 .DS_Store
