@@ -146,7 +146,7 @@ jobs:
           set -euo pipefail
           OUT="artifacts/${{ matrix.name }}"
           mkdir -p "$OUT"
-          # 每平台只收一种安装包：macOS .dmg / Linux .AppImage / Windows *-setup.exe
+          # 安装包：macOS .dmg / Linux .AppImage+.deb+.rpm / Windows *-setup.exe
           CANDIDATES=(
             workspace/target
             workspace/desktop/src-tauri/target
@@ -163,7 +163,8 @@ jobs:
               cp "$f" "$dest"
               echo "  + $dest"
             done < <(find "$ROOT" -type f -path '*/release/bundle/*' \( \
-              -name '*.dmg' -o -name '*.AppImage' -o -name '*-setup.exe' \
+              -name '*.dmg' -o -name '*.AppImage' -o -name '*.deb' -o -name '*.rpm' \
+              -o -name '*-setup.exe' \
             \) -print0 2>/dev/null || true)
           done
           ls -la "$OUT" || true
@@ -227,7 +228,8 @@ jobs:
             cp "$f" "$dest"
             echo "staged $dest"
           done < <(find release-assets -type f \( \
-            -name '*.dmg' -o -name '*.AppImage' -o -name '*-setup.exe' \
+            -name '*.dmg' -o -name '*.AppImage' -o -name '*.deb' -o -name '*.rpm' \
+            -o -name '*-setup.exe' \
           \) -print0)
           echo "---- upload tree ----"
           ls -la upload
@@ -251,5 +253,5 @@ jobs:
 
             安装包：
             - macOS：`.dmg`（arm64 / x64）
-            - Linux：`.AppImage`
+            - Linux：`.AppImage`（通用）、`.deb`（Debian/Ubuntu）、`.rpm`（Fedora/RHEL/CentOS）
             - Windows：`-setup.exe`
