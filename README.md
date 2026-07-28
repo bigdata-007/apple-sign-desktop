@@ -65,6 +65,12 @@
 
 ---
 
+### 运行
+macos 需要执行下面的命令后再打开，否则会提示文件已损坏
+```
+xattr -cr /下载路径/apple-sign-macos-aarch64/macos/AppleSign.app
+```
+
 ## 关于本仓库
 
 本仓库基于AI全自动Sola模式完全实现，页面预览可查看preview里面的图片。
