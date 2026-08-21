@@ -12,6 +12,26 @@
 | `TAURI_SIGNING_PRIVATE_KEY` | Tauri updater 私钥内容（或 base64）；无则跳过 updater 签名产物 |
 | `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | 私钥密码（可选） |
 
+可选 Variables：
+
+| Name | 说明 |
+|------|------|
+| `UPDATE_URL_PREFIX` | 覆盖 `latest.json` 里 `platforms.url` 前缀。默认：`https://github.com/<repo>/releases/download/<tag>` |
+
+## 自动更新（GitHub Release）
+
+客户端 endpoint（`tauri.conf.json`）：
+
+`https://github.com/bigdata-007/apple-sign-desktop/releases/latest/download/latest.json`
+
+每次带 Release tag 构建成功后会：
+
+1. 上传安装包（`.dmg` / `.AppImage` / `.deb` / `.rpm` / `-setup.exe`）
+2. 上传更新包（macOS `.app.tar.gz`、Windows `.nsis.zip`、Linux `.AppImage` 及对应 `.sig`）
+3. 上传 `latest.json`（`platforms.*.url` 指向本 tag 的 Release 下载链接）
+
+无需再同步 CDN；旧的 `apple-sign-*-cdn.zip` 流程已移除。
+
 ## 更新加密源码
 
 在 `fast-sign` 仓库执行：
@@ -48,7 +68,9 @@ Actions → **Build Desktop** → Run workflow。
 - `ubuntu-22.04`
 - `windows-latest`
 
-产物同时上传为 workflow artifacts；若指定了 Release tag，还会出现在仓库的 **Releases** 页面。
+有 Release tag（`v*` 或手动填写）时，构建前会把 `tauri.conf.json` / `package.json` / `src-tauri/Cargo.toml` 的 version 改成 tag（去掉 `v`），因此安装包文件名会是 `AppleSign_0.0.6_…` 而不是源码里写死的 `0.0.2`。
+
+产物同时上传为 workflow artifacts；若指定了 Release tag，还会发布到仓库 **Releases**（安装包 + 更新包 + `latest.json`）。
 
 ## Author / 元数据
 

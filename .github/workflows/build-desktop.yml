@@ -117,6 +117,58 @@ jobs:
         working-directory: workspace/desktop
         run: npm ci
 
+      - name: Sync app version from release tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG=""
+          if [ "${{ github.event_name }}" = "push" ] && [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+            TAG="${GITHUB_REF#refs/tags/}"
+          elif [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ inputs.release_tag }}" ]; then
+            TAG="${{ inputs.release_tag }}"
+          fi
+          if [ -z "$TAG" ]; then
+            echo "no release tag — keep version in source (tauri.conf.json)"
+            python3 -c "import json; print('tauri version:', json.load(open('workspace/desktop/src-tauri/tauri.conf.json'))['version'])"
+            exit 0
+          fi
+          VER="${TAG#v}"
+          if [[ ! "$VER" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-].*)?$ ]]; then
+            echo "ERROR: tag '$TAG' → version '$VER' looks invalid" >&2
+            exit 1
+          fi
+          export VER
+          python3 <<'PY'
+          import json, os, pathlib, re
+          ver = os.environ["VER"]
+          conf = pathlib.Path("workspace/desktop/src-tauri/tauri.conf.json")
+          data = json.loads(conf.read_text())
+          old = data.get("version")
+          data["version"] = ver
+          conf.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n")
+          print(f"tauri.conf.json version: {old} → {ver}")
+
+          pkg = pathlib.Path("workspace/desktop/package.json")
+          if pkg.is_file():
+              pdata = json.loads(pkg.read_text())
+              pdata["version"] = ver
+              pkg.write_text(json.dumps(pdata, ensure_ascii=False, indent=2) + "\n")
+              print(f"package.json version → {ver}")
+
+          cargo = pathlib.Path("workspace/desktop/src-tauri/Cargo.toml")
+          text = cargo.read_text()
+          text2, n = re.subn(
+              r'(?m)^version\s*=\s*"[^"]*"',
+              f'version = "{ver}"',
+              text,
+              count=1,
+          )
+          if n != 1:
+              raise SystemExit("failed to patch desktop/src-tauri/Cargo.toml version")
+          cargo.write_text(text2)
+          print(f"Cargo.toml version → {ver}")
+          PY
+
       - name: Build (Tauri)
         working-directory: workspace/desktop
         shell: bash
@@ -278,85 +330,83 @@ jobs:
           merge-multiple: false
           path: release-assets
 
-      - name: Stage installers, update pack, latest.json
+      - name: Stage installers, updater packs, latest.json
         shell: bash
         env:
-          # 可在仓库 Variables 设 UPDATE_URL_PREFIX=https://ipadump.com/apple-sign
+          # 默认同仓库 GitHub Release；可设 Variables.UPDATE_URL_PREFIX 覆盖（勿带末尾 /）
+          # 例：https://github.com/bigdata-007/apple-sign-desktop/releases/download/v1.0.0
           UPDATE_URL_PREFIX: ${{ vars.UPDATE_URL_PREFIX }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
         run: |
           set -euo pipefail
           TAG="${{ steps.tag.outputs.name }}"
           VER="${{ steps.tag.outputs.version }}"
-          PREFIX="${UPDATE_URL_PREFIX:-/apple-sign}"
+          DEFAULT_PREFIX="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}"
+          PREFIX="${UPDATE_URL_PREFIX:-$DEFAULT_PREFIX}"
           PREFIX="${PREFIX%/}"
-          CDN_ROOT="cdn/apple-sign"
-          VER_DIR="$CDN_ROOT/v${VER}"
-          mkdir -p upload/installers "$VER_DIR"
-
-          while IFS= read -r -d '' f; do
-            base="$(basename "$f")"
-            case "$base" in
-              updater-manifest.json) continue ;;
-              *.sig|*.app.tar.gz|*.nsis.zip) continue ;;
-              *.dmg|*.AppImage|*.deb|*.rpm|*-setup.exe)
-                cp "$f" "upload/installers/$base"
-                cp "$f" "$VER_DIR/$base"
-                echo "installer $base"
-                ;;
-            esac
-          done < <(find release-assets -type f -print0)
+          mkdir -p upload/installers upload/updater
 
           while IFS= read -r -d '' mf; do
             python3 -c "
           import json, pathlib, shutil
           mf = pathlib.Path(r'''$mf''')
           data = json.loads(mf.read_text())
-          ver_dir = pathlib.Path(r'''$VER_DIR''')
+          out = pathlib.Path('upload/updater')
           src_u = mf.parent / data['updater_file']
           src_s = mf.parent / data['signature_file']
           if not src_u.is_file() or not src_s.is_file():
               raise SystemExit(f'missing updater/sig for {data}')
-          shutil.copy2(src_u, ver_dir / data['updater_file'])
-          shutil.copy2(src_s, ver_dir / data['signature_file'])
+          shutil.copy2(src_u, out / data['updater_file'])
+          shutil.copy2(src_s, out / data['signature_file'])
           print('updater', data['platform'], data['updater_file'])
           "
           done < <(find release-assets -type f -name 'updater-manifest.json' -print0)
 
+          # 安装包；与 updater 同名（如 Linux .AppImage）则跳过，避免 Release 资源重名
+          while IFS= read -r -d '' f; do
+            base="$(basename "$f")"
+            case "$base" in
+              updater-manifest.json) continue ;;
+              *.sig|*.app.tar.gz|*.nsis.zip) continue ;;
+              *.dmg|*.AppImage|*.deb|*.rpm|*-setup.exe)
+                if [ -e "upload/updater/$base" ]; then
+                  echo "skip installer (also updater) $base"
+                  continue
+                fi
+                cp "$f" "upload/installers/$base"
+                echo "installer $base"
+                ;;
+            esac
+          done < <(find release-assets -type f -print0)
+
           NOTES_FILE="$(mktemp)"
           {
-            if git describe --tags --abbrev=0 "${TAG}^" >/dev/null 2>&1; then
-              PREV="$(git describe --tags --abbrev=0 "${TAG}^")"
-              git log --pretty=format:'- %s' "${PREV}..${TAG}" 2>/dev/null || true
-            elif git rev-list -n 1 "${TAG}" >/dev/null 2>&1; then
-              git log --pretty=format:'- %s' -15 "${TAG}" 2>/dev/null || true
-            else
-              git log --pretty=format:'- %s' -15 HEAD 2>/dev/null || true
-            fi
+            echo "Apple Sign Desktop ${TAG}"
             echo
+            echo "- 安装包与自动更新包见本 Release Assets"
+            echo "- latest.json → platforms.url 指向本 tag 下载链接"
           } > "$NOTES_FILE"
-          if ! grep -q '[^[:space:]]' "$NOTES_FILE"; then
-            echo "- Release ${TAG}" > "$NOTES_FILE"
-          fi
 
           PUB_DATE="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
-          export VER PREFIX VER_DIR CDN_ROOT PUB_DATE NOTES_FILE
+          export VER PREFIX TAG PUB_DATE NOTES_FILE
           python3 <<'PY'
           import json, pathlib, os
           ver = os.environ["VER"]
           prefix = os.environ["PREFIX"]
-          ver_dir = pathlib.Path(os.environ["VER_DIR"])
           notes = pathlib.Path(os.environ["NOTES_FILE"]).read_text().strip()
           pub_date = os.environ["PUB_DATE"]
+          upd = pathlib.Path("upload/updater")
           platforms = {}
           for mf in pathlib.Path("release-assets").rglob("updater-manifest.json"):
               data = json.loads(mf.read_text())
               key = data["platform"]
               fname = data["updater_file"]
-              sig_path = ver_dir / data["signature_file"]
-              if not (ver_dir / fname).is_file() or not sig_path.is_file():
-                  raise SystemExit(f"cdn missing files for {key}")
+              sig_path = upd / data["signature_file"]
+              pkg = upd / fname
+              if not pkg.is_file() or not sig_path.is_file():
+                  raise SystemExit(f"updater missing files for {key}: {fname}")
               platforms[key] = {
-                  "url": f"{prefix}/v{ver}/{fname}",
+                  "url": f"{prefix}/{fname}",
                   "signature": sig_path.read_text().strip(),
               }
           if not platforms:
@@ -367,26 +417,24 @@ jobs:
               "pub_date": pub_date,
               "platforms": dict(sorted(platforms.items())),
           }
-          cdn_root = pathlib.Path(os.environ["CDN_ROOT"])
-          out = cdn_root / "latest.json"
           text = json.dumps(doc, ensure_ascii=False, indent=2) + "\n"
-          out.write_text(text)
-          (ver_dir / "latest.json").write_text(text)
+          pathlib.Path("upload/latest.json").write_text(text)
           print(text)
           PY
 
           echo "---- installers ----"
           ls -la upload/installers
-          echo "---- cdn tree ----"
-          find cdn -type f | sort
-          cp "$CDN_ROOT/latest.json" upload/latest.json
-          (cd cdn && zip -qr "../upload/apple-sign-v${VER}-cdn.zip" apple-sign)
+          echo "---- updater ----"
+          ls -la upload/updater
 
-      - name: Upload CDN folder artifact
+      - name: Upload release staging artifact
         uses: actions/upload-artifact@v7
         with:
-          name: apple-sign-cdn-v${{ steps.tag.outputs.version }}
-          path: cdn/apple-sign
+          name: apple-sign-release-v${{ steps.tag.outputs.version }}
+          path: |
+            upload/installers
+            upload/updater
+            upload/latest.json
           if-no-files-found: error
           retention-days: 30
 
@@ -397,15 +445,15 @@ jobs:
           name: ${{ steps.tag.outputs.name }}
           files: |
             upload/installers/*
+            upload/updater/*
             upload/latest.json
-            upload/apple-sign-v${{ steps.tag.outputs.version }}-cdn.zip
           fail_on_unmatched_files: true
           body: |
             Apple Sign Desktop ${{ steps.tag.outputs.name }}
 
-            安装包见 Assets；CDN 同步目录见 `apple-sign-v${{ steps.tag.outputs.version }}-cdn.zip`（含 `latest.json` 与 `v${{ steps.tag.outputs.version }}/` 更新包）。
+            - `latest.json`：自动更新清单（`platforms.url` → 本 Release 资源）
+            - 安装包：macOS `.dmg` / Linux `.AppImage` `.deb` `.rpm` / Windows `-setup.exe`
+            - 更新包：macOS `.app.tar.gz`（+ `.sig`）/ Linux `.AppImage`（+ `.sig`）/ Windows `.nsis.zip`（+ `.sig`）
 
-            安装包：
-            - macOS：`.dmg`（arm64 / x64）
-            - Linux：`.AppImage` / `.deb` / `.rpm`
-            - Windows：`-setup.exe`
+            客户端 updater endpoint：
+            `https://github.com/${{ github.repository }}/releases/latest/download/latest.json`
