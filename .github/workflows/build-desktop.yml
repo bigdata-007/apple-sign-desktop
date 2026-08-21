@@ -129,34 +129,46 @@ jobs:
           fi
           if [ -z "$TAG" ]; then
             echo "no release tag — keep version in source (tauri.conf.json)"
-            python3 -c "import json; print('tauri version:', json.load(open('workspace/desktop/src-tauri/tauri.conf.json'))['version'])"
+            python3 -c "import json; print('tauri version:', json.load(open('workspace/desktop/src-tauri/tauri.conf.json', encoding='utf-8'))['version'])"
             exit 0
           fi
           VER="${TAG#v}"
           if [[ ! "$VER" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-].*)?$ ]]; then
-            echo "ERROR: tag '$TAG' → version '$VER' looks invalid" >&2
+            echo "ERROR: tag '$TAG' -> version '$VER' looks invalid" >&2
             exit 1
           fi
           export VER
+          # Windows runner 默认控制台编码非 UTF-8，避免 print 含非 ASCII 导致 exit 1
+          export PYTHONIOENCODING=utf-8
           python3 <<'PY'
-          import json, os, pathlib, re
+          import json, os, pathlib, re, sys
           ver = os.environ["VER"]
+
+          def read_text(p: pathlib.Path) -> str:
+              raw = p.read_bytes()
+              if raw.startswith(b"\xef\xbb\xbf"):
+                  raw = raw[3:]
+              return raw.decode("utf-8")
+
+          def write_text(p: pathlib.Path, text: str) -> None:
+              p.write_bytes(text.encode("utf-8"))
+
           conf = pathlib.Path("workspace/desktop/src-tauri/tauri.conf.json")
-          data = json.loads(conf.read_text())
+          data = json.loads(read_text(conf))
           old = data.get("version")
           data["version"] = ver
-          conf.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n")
-          print(f"tauri.conf.json version: {old} → {ver}")
+          write_text(conf, json.dumps(data, ensure_ascii=False, indent=2) + "\n")
+          print(f"tauri.conf.json version: {old} -> {ver}")
 
           pkg = pathlib.Path("workspace/desktop/package.json")
           if pkg.is_file():
-              pdata = json.loads(pkg.read_text())
+              pdata = json.loads(read_text(pkg))
               pdata["version"] = ver
-              pkg.write_text(json.dumps(pdata, ensure_ascii=False, indent=2) + "\n")
-              print(f"package.json version → {ver}")
+              write_text(pkg, json.dumps(pdata, ensure_ascii=False, indent=2) + "\n")
+              print(f"package.json version -> {ver}")
 
           cargo = pathlib.Path("workspace/desktop/src-tauri/Cargo.toml")
-          text = cargo.read_text()
+          text = read_text(cargo)
           text2, n = re.subn(
               r'(?m)^version\s*=\s*"[^"]*"',
               f'version = "{ver}"',
@@ -164,9 +176,12 @@ jobs:
               count=1,
           )
           if n != 1:
-              raise SystemExit("failed to patch desktop/src-tauri/Cargo.toml version")
-          cargo.write_text(text2)
-          print(f"Cargo.toml version → {ver}")
+              # debug aid on Windows
+              head = "\n".join(text.splitlines()[:12])
+              print("Cargo.toml head:\n" + head, file=sys.stderr)
+              raise SystemExit(f"failed to patch Cargo.toml version (n={n})")
+          write_text(cargo, text2)
+          print(f"Cargo.toml version -> {ver}")
           PY
 
       - name: Build (Tauri)
